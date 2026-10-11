@@ -1,8 +1,5 @@
 streamlit
-numpy
-pandas
-scipy
 rasterio
 geopandas
-shapely
-Pillow
+numpy
+whitebox
