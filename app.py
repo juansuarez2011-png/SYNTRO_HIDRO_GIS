@@ -13,7 +13,6 @@ try:
 except ImportError:
     WHITEBOX_OK = False
 
-# Configuración de la página en Streamlit con el logo icon.png
 st.set_page_config(
     page_title="Syntro GIS - Delimitador Hidrográfico",
     page_icon="icon.png" if os.path.exists("icon.png") else "🌊",
@@ -21,7 +20,6 @@ st.set_page_config(
 )
 
 def force_crs_on_raster(raster_path, crs):
-    """Reescribe un ráster forzando su CRS."""
     if not os.path.exists(raster_path):
         return
     with rasterio.open(raster_path) as src:
@@ -34,7 +32,6 @@ def force_crs_on_raster(raster_path, crs):
         dst.write(data)
 
 def force_crs_on_vector(vector_path, crs):
-    """Reescribe un shapefile forzando su CRS."""
     if not os.path.exists(vector_path):
         return None
     gdf = gpd.read_file(vector_path)
@@ -54,7 +51,6 @@ def force_crs_on_vector(vector_path, crs):
     return gdf
 
 def extract_stream_outlets(streams_path, fdir_path, acc_path, out_path, spacing):
-    """Genera un ráster con IDs únicos en las celdas de cabecera de cada segmento."""
     with rasterio.open(streams_path) as src:
         streams = src.read(1)
         meta = src.meta.copy()
@@ -88,7 +84,6 @@ def extract_stream_outlets(streams_path, fdir_path, acc_path, out_path, spacing)
     return len(sampled_rows)
 
 def main():
-    # Mostrar el logo icon.png en la interfaz si existe
     col_logo, col_title = st.columns([1, 8])
     with col_logo:
         if os.path.exists("icon.png"):
@@ -96,10 +91,10 @@ def main():
     with col_title:
         st.title("SINTRO HIDRO-GIS: Microcuencas + Orden de Ríos (UTM)")
     
-    st.markdown("Herramienta automatizada de análisis hidrológico basada en WhiteboxTools[cite: 12].")
+    st.markdown("Herramienta automatizada de análisis hidrológico.")
 
     if not WHITEBOX_OK:
-        st.error("WhiteboxTools no está instalado. Asegúrate de incluirlo en tu archivo `requirements.txt`.")
+        st.error("WhiteboxTools no está instalado.")
         return
 
     with st.sidebar:
@@ -108,7 +103,6 @@ def main():
         st.header("⚙️ Parámetros de Análisis")
         threshold = st.number_input("Umbral de Acumulación (Celdas)", min_value=10, max_value=50000, value=500, step=50)
         spacing = st.number_input("Puntos de Salida por Río (Espaciado)", min_value=10, max_value=2000, value=200, step=50)
-        st.info("💡 **Consejo:** Umbral BAJO genera más microcuencas; umbral ALTO genera menos cuencas de mayor tamaño.")
 
     uploaded_file = st.file_uploader("📂 Sube tu Modelo Digital de Elevación (DEM en formato GeoTIFF)", type=["tif", "tiff"])
 
@@ -126,7 +120,6 @@ def main():
                 log_messages.append(line)
                 log_container.text_area("Registro de Ejecución (Log)", value="\n".join(log_messages), height=250)
 
-            # Crear directorio temporal seguro para evitar errores de permisos
             with tempfile.TemporaryDirectory() as tmp_dir:
                 dem_input_path = os.path.join(tmp_dir, uploaded_file.name)
                 with open(dem_input_path, "wb") as f:
@@ -143,11 +136,14 @@ def main():
                         raise ValueError("El DEM no tiene CRS definido. Asignale un sistema proyectado UTM.")
                     log(f"CRS detectado en el DEM: {dem_crs}")
 
+                    # Solución robusta de permisos para WhiteboxTools en Linux
                     wbt = whitebox.WhiteboxTools()
                     wbt.set_verbose_mode(False)
-                    # Solución al error de permisos: apuntar los binarios y el directorio de trabajo al temporal
                     wbt.work_dir = tmp_dir
                     wbt.set_working_dir(tmp_dir)
+                    
+                    # Forzar la ruta del ejecutable al directorio temporal si es necesario
+                    wbt.exe_path = os.path.join(tmp_dir, "whitebox_tools")
 
                     dem_fill         = os.path.join(tmp_dir, "01_dem_fill.tif")
                     dem_fdir         = os.path.join(tmp_dir, "02_flow_dir.tif")
@@ -161,25 +157,21 @@ def main():
                     streams_geojson  = os.path.join(tmp_dir, "red_hidrica.geojson")
                     watersheds_geojson = os.path.join(tmp_dir, "microcuencas.geojson")
 
-                    # 1. Fill
                     log("[1/8] Rellenando depresiones topográficas...")
                     progress_bar.progress(15)
                     wbt.fill_depressions(dem_input_path, dem_fill)
                     force_crs_on_raster(dem_fill, dem_crs)
 
-                    # 2. Flow Direction
                     log("[2/8] Calculando dirección de flujo (D8)...")
                     progress_bar.progress(30)
                     wbt.d8_pointer(dem_fill, dem_fdir)
                     force_crs_on_raster(dem_fdir, dem_crs)
 
-                    # 3. Flow Accumulation
                     log("[3/8] Calculando acumulación de flujo...")
                     progress_bar.progress(45)
                     wbt.d8_flow_accumulation(dem_fill, dem_acc, out_type='cells')
                     force_crs_on_raster(dem_acc, dem_crs)
 
-                    # 4. Streams por umbral
                     log(f"[4/8] Extrayendo red hídrica con umbral = {threshold}...")
                     progress_bar.progress(60)
                     wbt.extract_streams(dem_acc, dem_stream, threshold=threshold)
@@ -190,9 +182,8 @@ def main():
                         n_cells = int((streams_arr > 0).sum())
                     log(f"  Celdas de río detectadas: {n_cells}")
                     if n_cells == 0:
-                        raise ValueError(f"El umbral {threshold} es muy alto y no generó red hídrica. Pruebe reduciéndolo.")
+                        raise ValueError(f"El umbral {threshold} es muy alto y no generó red hídrica.")
 
-                    # 5. Orden de Ríos (Strahler)
                     log("[5/8] Calculando orden de ríos (Strahler)...")
                     progress_bar.progress(70)
                     try:
@@ -200,23 +191,20 @@ def main():
                         force_crs_on_raster(dem_stream_order, dem_crs)
                         log("  Orden Strahler calculado con éxito.")
                     except Exception as e:
-                        log(f"  (Aviso) No se pudo calcular orden Strahler: {e}")
+                        log(f"  (Aviso) Orden Strahler omitido: {e}")
                         dem_stream_order = None
 
-                    # 6. Puntos de salida
                     log("[6/8] Extrayendo puntos de salida (outlets)...")
                     progress_bar.progress(80)
                     n_outlets = extract_stream_outlets(dem_stream, dem_fdir, dem_acc, dem_outlets, spacing)
                     force_crs_on_raster(dem_outlets, dem_crs)
                     log(f"  Puntos de salida generados: {n_outlets}")
 
-                    # 7. Watershed
-                    log("[7/8] Delimitando microcuencas por cada punto de salida...")
+                    log("[7/8] Delimitando microcuencas...")
                     progress_bar.progress(90)
                     wbt.watershed(dem_fdir, dem_outlets, dem_watershed, esri_pntr=False)
                     force_crs_on_raster(dem_watershed, dem_crs)
 
-                    # 8. Vectorización
                     log("[8/8] Vectorizando resultados a formato GeoJSON...")
                     progress_bar.progress(95)
 
@@ -226,7 +214,7 @@ def main():
                         if gdf_s is not None:
                             gdf_s.to_file(streams_geojson, driver="GeoJSON")
                     except Exception as e:
-                        log(f"  (Aviso) Vectorización de red hídrica: {e}")
+                        log(f"  (Aviso) Red hídrica vectorial: {e}")
 
                     try:
                         wbt.raster_to_vector_polygons(dem_watershed, watersheds_vec)
@@ -235,33 +223,22 @@ def main():
                             gdf_w["Area_ha"] = gdf_w.geometry.area / 10000.0
                             gdf_w.to_file(watersheds_geojson, driver="GeoJSON")
                     except Exception as e:
-                        log(f"  (Aviso) Vectorización de microcuencas: {e}")
+                        log(f"  (Aviso) Microcuencas vectoriales: {e}")
 
                     progress_bar.progress(100)
                     elapsed_time = int(time.time() - start_time)
-                    log(f"🎉 ¡PROCESO COMPLETADO EXITOSAMENTE en {elapsed_time}s — {n_outlets} microcuencas generadas!")
+                    log(f"🎉 ¡PROCESO COMPLETADO EN {elapsed_time}s — {n_outlets} microcuencas!")
 
                     st.success(f"Se procesaron {n_outlets} microcuencas correctamente.")
 
-                    # Botones de descarga
                     col1, col2 = st.columns(2)
                     if os.path.exists(watersheds_geojson):
                         with open(watersheds_geojson, "rb") as f:
-                            col1.download_button(
-                                label="📥 Descargar Microcuencas (GeoJSON)",
-                                data=f,
-                                file_name="microcuencas.geojson",
-                                mime="application/geo+json"
-                            )
+                            col1.download_button("📥 Descargar Microcuencas (GeoJSON)", f, "microcuencas.geojson", "application/geo+json")
                     
                     if os.path.exists(streams_geojson):
                         with open(streams_geojson, "rb") as f:
-                            col2.download_button(
-                                label="📥 Descargar Red Hídrica (GeoJSON)",
-                                data=f,
-                                file_name="red_hidrica.geojson",
-                                mime="application/geo+json"
-                            )
+                            col2.download_button("📥 Descargar Red Hídrica (GeoJSON)", f, "red_hidrica.geojson", "application/geo+json")
 
                 except Exception as e:
                     st.error(f"Error durante el procesamiento: {str(e)}")
