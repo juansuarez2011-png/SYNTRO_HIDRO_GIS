@@ -5,24 +5,42 @@ import tempfile
 import traceback
 import time
 
-# ============================================================
-# FIX PARA STREAMLIT CLOUD:
-# whitebox intenta descargar su binario en site-packages (sin permisos).
-# Le decimos que lo haga en /tmp/wbt (con permisos).
-# ============================================================
-os.environ["WBT_PATH"] = "/tmp/wbt"
-os.makedirs("/tmp/wbt", exist_ok=True)
-
 import streamlit as st
 import numpy as np
 import rasterio
 import geopandas as gpd
 
+# ============================================================
+# PARCHE 1: compatibilidad NumPy 2.x <-> pysheds antiguo
+# ============================================================
+if not hasattr(np, "in1d"):     np.in1d     = np.isin
+if not hasattr(np, "float_"):   np.float_   = np.float64
+if not hasattr(np, "complex_"): np.complex_ = np.complex128
+if not hasattr(np, "unicode_"): np.unicode_ = np.str_
+if not hasattr(np, "object_"):  np.object_  = object
+if not hasattr(np, "bool8"):    np.bool8    = np.bool_
+if not hasattr(np, "int0"):     np.int0     = np.intp
+if not hasattr(np, "NaN"):      np.NaN      = np.nan
+if not hasattr(np, "Inf"):      np.Inf      = np.inf
+
+# ============================================================
+# PARCHE 2: memoryview -> ndarray (NumPy 2.x lo dejó de hacer)
+# ============================================================
+_asarray_original = np.asarray
+def _asarray_patched(a, dtype=None, order=None, **kwargs):
+    if isinstance(a, memoryview):
+        a = np.frombuffer(a, dtype=a.format if a.format else None)
+        if dtype is not None:
+            a = a.astype(dtype, copy=False)
+        return a
+    return _asarray_original(a, dtype=dtype, order=order, **kwargs)
+np.asarray = _asarray_patched
+
 try:
-    import whitebox
-    WHITEBOX_OK = True
+    from pysheds.grid import Grid
+    PYSHEDS_OK = True
 except ImportError:
-    WHITEBOX_OK = False
+    PYSHEDS_OK = False
 
 
 LOGO_PATH = "icon.png"
@@ -40,42 +58,16 @@ st.set_page_config(
 
 
 # ============================================================
-# CSS PERSONALIZADO
+# CSS
 # ============================================================
 st.markdown("""
 <style>
     .stApp { background-color: #0f172a; }
-    .main-title {
-        color: #38bdf8;
-        font-size: 2.2rem;
-        font-weight: 700;
-        margin-bottom: 0;
-    }
-    .subtitle {
-        color: #94a3b8;
-        font-size: 1rem;
-        margin-top: 0;
-    }
-    .stButton>button {
-        background-color: #0284c7;
-        color: white;
-        font-weight: 600;
-        border: none;
-        padding: 0.6rem 1.2rem;
-        border-radius: 6px;
-    }
+    .main-title { color: #38bdf8; font-size: 2.2rem; font-weight: 700; margin-bottom: 0; }
+    .subtitle { color: #94a3b8; font-size: 1rem; margin-top: 0; }
+    .stButton>button { background-color: #0284c7; color: white; font-weight: 600; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; }
     .stButton>button:hover { background-color: #0369a1; }
-    .log-box {
-        background-color: #0f172a;
-        color: #34d399;
-        font-family: 'Consolas', monospace;
-        font-size: 0.85rem;
-        padding: 1rem;
-        border-radius: 6px;
-        max-height: 400px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-    }
+    .log-box { background-color: #0f172a; color: #34d399; font-family: 'Consolas', monospace; font-size: 0.85rem; padding: 1rem; border-radius: 6px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -83,22 +75,7 @@ st.markdown("""
 # ============================================================
 # HELPERS
 # ============================================================
-def force_crs_on_raster(raster_path, crs):
-    """Reescribe un ráster forzando su CRS si no lo tiene."""
-    if not os.path.exists(raster_path):
-        return
-    with rasterio.open(raster_path) as src:
-        if src.crs is not None:
-            return
-        data = src.read()
-        meta = src.meta.copy()
-        meta.update({"crs": crs})
-    with rasterio.open(raster_path, "w", **meta) as dst:
-        dst.write(data)
-
-
 def force_crs_on_vector(vector_path, crs):
-    """Reescribe un shapefile forzando su CRS."""
     if not os.path.exists(vector_path):
         return None
     gdf = gpd.read_file(vector_path)
@@ -107,21 +84,14 @@ def force_crs_on_vector(vector_path, crs):
     return gdf
 
 
-def extract_stream_outlets(streams_path, acc_path, out_path, spacing):
-    """Genera raster con IDs únicos en cabeceras de segmento de río."""
-    with rasterio.open(streams_path) as src:
-        streams = src.read(1)
-        meta = src.meta.copy()
-
-    with rasterio.open(acc_path) as src:
-        acc = src.read(1).astype(np.float64)
-
+def extract_stream_outlets(streams, acc, spacing):
+    """Genera array con IDs únicos en cabeceras de segmento."""
     stream_mask = streams > 0
     stream_acc = np.where(stream_mask, acc, 0)
 
     rows, cols = np.where(stream_mask)
     if len(rows) == 0:
-        raise ValueError("No hay celdas de río para extraer puntos de salida.")
+        raise ValueError("No hay celdas de río.")
 
     acc_vals = stream_acc[rows, cols]
     order = np.argsort(-acc_vals)
@@ -135,15 +105,10 @@ def extract_stream_outlets(streams_path, acc_path, out_path, spacing):
     for i, (r, c) in enumerate(zip(sampled_rows, sampled_cols), start=1):
         outlets[r, c] = i
 
-    meta.update({"count": 1, "dtype": "int32", "nodata": 0})
-    with rasterio.open(out_path, "w", **meta) as dst:
-        dst.write(outlets, 1)
-
-    return len(sampled_rows)
+    return outlets, len(sampled_rows)
 
 
 def zip_outputs(folder):
-    """Empaqueta los archivos de salida en un ZIP para descarga."""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(folder):
@@ -193,7 +158,7 @@ with st.sidebar:
     spacing = st.number_input(
         "Puntos de Salida por Río",
         min_value=10, max_value=2000, value=200, step=10,
-        help="Cada N celdas de río se toma un punto de salida (emula Stream Link)."
+        help="Cada N celdas de río se toma un punto de salida."
     )
 
     st.divider()
@@ -203,8 +168,8 @@ with st.sidebar:
 # ============================================================
 # PROCESAMIENTO
 # ============================================================
-if not WHITEBOX_OK:
-    st.error("⚠️ WhiteboxTools no está instalado. Revisá `requirements.txt`.")
+if not PYSHEDS_OK:
+    st.error("⚠️ `pysheds` no está instalado. Revisá `requirements.txt`.")
     st.stop()
 
 if run_btn:
@@ -234,7 +199,7 @@ if run_btn:
             with open(dem_path, "wb") as f:
                 f.write(dem_file.read())
 
-            log("=== Inicio del procesamiento ===")
+            log("=== Inicio del procesamiento (pysheds) ===")
             update_log()
             progress.progress(5, text="Verificando CRS del DEM...")
 
@@ -243,7 +208,7 @@ if run_btn:
                 dem_shape = (src.height, src.width)
 
             if dem_crs is None:
-                st.error("❌ El DEM no tiene CRS definido. Asignale uno (idealmente UTM).")
+                st.error("❌ El DEM no tiene CRS definido.")
                 st.stop()
 
             log(f"CRS del DEM: {dem_crs}")
@@ -251,166 +216,179 @@ if run_btn:
             if not dem_crs.is_projected:
                 log("⚠️ CRS no proyectado. Las áreas podrían ser incorrectas.")
 
-            # --- Inicializar WhiteboxTools (descarga binario en /tmp/wbt)
-            log("Inicializando WhiteboxTools...")
-            update_log()
-            try:
-                wbt = whitebox.WhiteboxTools()
-                wbt.set_verbose_mode(True)   # <-- CAMBIO: verbose activado
-                wbt.set_working_dir(out_folder)
-                log("WhiteboxTools listo.")
-            except Exception as e:
-                log(f"ERROR al inicializar WhiteboxTools: {e}")
-                update_log()
-                st.error(f"❌ No se pudo inicializar WhiteboxTools: {e}")
-                st.stop()
+            # --- 1. Cargar con pysheds
+            log("[1/8] Cargando DEM en pysheds...")
+            update_log(); progress.progress(10, text="Cargando DEM...")
+            grid = Grid.from_raster(dem_path)
+            dem = grid.read_raster(dem_path)
 
-            dem_fill         = os.path.join(out_folder, "01_dem_fill.tif")
-            dem_fdir         = os.path.join(out_folder, "02_flow_dir.tif")
-            dem_acc          = os.path.join(out_folder, "03_flow_accum.tif")
-            dem_stream       = os.path.join(out_folder, "04_streams.tif")
-            dem_stream_order = os.path.join(out_folder, "05_stream_order.tif")
-            dem_outlets      = os.path.join(out_folder, "06_outlets.tif")
-            dem_watershed    = os.path.join(out_folder, "07_watersheds.tif")
-            streams_vec      = os.path.join(out_folder, "red_hidrica.shp")
-            watersheds_vec   = os.path.join(out_folder, "microcuencas.shp")
+            # --- 2. Fill pits + depressions + flats
+            log("[2/8] Rellenando depresiones...")
+            update_log(); progress.progress(20, text="Rellenando depresiones...")
+            pit_filled = grid.fill_pits(dem)
+            flooded = grid.fill_depressions(pit_filled)
+            inflated = grid.resolve_flats(flooded)
 
-            # --- 1. Fill
-            log("[1/8] Rellenando depresiones...")
-            update_log(); progress.progress(10, text="Rellenando depresiones...")
-            wbt.fill_depressions(dem_path, dem_fill)
-            if not os.path.exists(dem_fill):
-                raise RuntimeError("WBT no generó 01_dem_fill.tif")
-            force_crs_on_raster(dem_fill, dem_crs)
+            # --- 3. Flow direction (D8)
+            log("[3/8] Dirección de flujo (D8)...")
+            update_log(); progress.progress(30, text="Dirección de flujo...")
+            fdir = grid.flowdir(inflated)
 
-            # --- 2. Flow Direction
-            log("[2/8] Dirección de flujo...")
-            update_log(); progress.progress(20, text="Dirección de flujo...")
-            wbt.d8_pointer(dem_fill, dem_fdir)
-            if not os.path.exists(dem_fdir):
-                raise RuntimeError("WBT no generó 02_flow_dir.tif")
-            force_crs_on_raster(dem_fdir, dem_crs)
+            # --- 4. Flow accumulation
+            log("[4/8] Acumulación de flujo...")
+            update_log(); progress.progress(45, text="Acumulación de flujo...")
+            acc = grid.accumulation(fdir)
 
-            # --- 3. Flow Accumulation
-            log("[3/8] Acumulación de flujo...")
-            update_log(); progress.progress(30, text="Acumulación de flujo...")
-            wbt.d8_flow_accumulation(dem_fill, dem_acc, out_type='cells')
-            if not os.path.exists(dem_acc):
-                raise RuntimeError("WBT no generó 03_flow_accum.tif")
-            force_crs_on_raster(dem_acc, dem_crs)
-
-            # --- 4. Streams por umbral
-            log(f"[4/8] Red hídrica (umbral={threshold})...")
-            update_log(); progress.progress(45, text="Extrayendo red hídrica...")
-
-            # FIX: zero_background=True requerido en WBT 2.3.0+
-            try:
-                wbt.extract_streams(dem_acc, dem_stream,
-                                    threshold=threshold,
-                                    zero_background=True)
-            except Exception as e:
-                log(f"Error en extract_streams: {e}")
-
-            if not os.path.exists(dem_stream):
-                raise RuntimeError(
-                    f"WBT no generó {dem_stream}. "
-                    f"Umbral={threshold}. Probá bajarlo (ej: 500)."
-                )
-
-            force_crs_on_raster(dem_stream, dem_crs)
-
-            with rasterio.open(dem_stream) as src:
-                streams_arr = src.read(1)
-                n_cells = int((streams_arr > 0).sum())
+            # --- 5. Streams por umbral
+            log(f"[5/8] Red hídrica (umbral={threshold})...")
+            update_log(); progress.progress(55, text="Extrayendo red hídrica...")
+            acc_arr = np.asarray(acc)
+            stream_mask = (acc_arr >= threshold).astype(np.uint8)
+            n_cells = int(stream_mask.sum())
             log(f"Celdas de río: {n_cells}")
             if n_cells == 0:
-                raise ValueError(f"El umbral {threshold} no generó red. Reducilo (ej: 500).")
+                raise ValueError(
+                    f"Umbral {threshold} muy alto. Reducilo (ej: 500)."
+                )
 
-            # --- 5. Orden de Strahler
-            log("[5/8] Orden de Strahler...")
-            update_log(); progress.progress(55, text="Orden de Strahler...")
-            try:
-                wbt.strahler_stream_order(dem_fdir, dem_stream, dem_stream_order)
-                force_crs_on_raster(dem_stream_order, dem_crs)
-                log("Orden calculado.")
-            except Exception as e:
-                log(f"(Aviso) Orden: {e}")
-                dem_stream_order = None
+            # Guardar ráster de streams
+            streams_path = os.path.join(out_folder, "04_streams.tif")
+            with rasterio.open(dem_path) as src:
+                meta = src.meta.copy()
+            meta.update({"count": 1, "dtype": "uint8", "nodata": 0})
+            with rasterio.open(streams_path, "w", **meta) as dst:
+                dst.write(stream_mask, 1)
 
             # --- 6. Puntos de salida
-            log("[6/8] Puntos de salida...")
+            log("[6/8] Puntos de salida por segmento...")
             update_log(); progress.progress(65, text="Puntos de salida...")
-            n_outlets = extract_stream_outlets(dem_stream, dem_acc, dem_outlets, spacing)
-            force_crs_on_raster(dem_outlets, dem_crs)
+            outlets_arr, n_outlets = extract_stream_outlets(
+                stream_mask, acc_arr, spacing
+            )
             log(f"Puntos de salida: {n_outlets}")
 
-            # --- 7. Watershed
-            log("[7/8] Delimitando cuencas...")
+            outlets_path = os.path.join(out_folder, "06_outlets.tif")
+            meta_out = meta.copy()
+            meta_out.update({"dtype": "int32"})
+            with rasterio.open(outlets_path, "w", **meta_out) as dst:
+                dst.write(outlets_arr, 1)
+
+            # --- 7. Watershed por cada punto de salida
+            log("[7/8] Delimitando microcuencas...")
             update_log(); progress.progress(78, text="Delimitando cuencas...")
-            wbt.watershed(dem_fdir, dem_outlets, dem_watershed, esri_pntr=False)
-            if not os.path.exists(dem_watershed):
-                raise RuntimeError("WBT no generó 07_watersheds.tif")
-            force_crs_on_raster(dem_watershed, dem_crs)
+
+            # Obtener coordenadas (r, c) de cada punto de salida
+            outlet_rows, outlet_cols = np.where(outlets_arr > 0)
+            n_out = len(outlet_rows)
+            log(f"Procesando {n_out} puntos...")
+
+            all_catchments = []
+            for i, (r, c) in enumerate(zip(outlet_rows, outlet_cols)):
+                try:
+                    catch = grid.catchment(x=int(c), y=int(r),
+                                           fdir=fdir, xytype='index')
+                    if catch is not None:
+                        arr = np.asarray(catch).astype(np.uint8)
+                        if arr.sum() > 0:
+                            all_catchments.append((i + 1, arr))
+                except Exception:
+                    continue
+
+                if (i + 1) % 20 == 0 or (i + 1) == n_out:
+                    pct = 78 + int(10 * (i + 1) / n_out)
+                    progress.progress(pct, text=f"Cuenca {i+1}/{n_out}...")
+
+            log(f"Cuencas válidas: {len(all_catchments)}")
+            if not all_catchments:
+                raise ValueError("No se generó ninguna cuenca.")
 
             # --- 8. Vectorizar
             log("[8/8] Vectorizando...")
             update_log(); progress.progress(90, text="Vectorizando...")
 
-            # Red hídrica con orden
+            from rasterio.features import shapes as raster_shapes
+            from shapely.geometry import shape
+
+            # Combinar todas las cuencas en un solo array con IDs
+            combined = np.zeros(dem_shape, dtype=np.int32)
+            for bid, arr in all_catchments:
+                combined[arr > 0] = bid
+
+            # Guardar ráster de watersheds
+            ws_path = os.path.join(out_folder, "07_watersheds.tif")
+            meta_ws = meta.copy()
+            meta_ws.update({"dtype": "int32"})
+            with rasterio.open(ws_path, "w", **meta_ws) as dst:
+                dst.write(combined, 1)
+
+            # Red hídrica vectorial
             try:
-                wbt.raster_streams_to_vector(dem_stream, dem_fdir, streams_vec)
-                gdf_s = force_crs_on_vector(streams_vec, dem_crs)
-
-                if gdf_s is not None and dem_stream_order and os.path.exists(dem_stream_order):
-                    with rasterio.open(dem_stream_order) as src:
-                        order_arr = src.read(1)
-                        order_transform = src.transform
-
-                    def get_order(geom):
+                from rasterio.features import shapes as rs
+                stream_shapes = list(rs(stream_mask, transform=grid.affine))
+                features_s = []
+                for shp, val in stream_shapes:
+                    if val == 1:
                         try:
-                            p = geom.interpolate(0.5, normalized=True)
-                            col, row = ~order_transform * (p.x, p.y)
-                            row, col = int(row), int(col)
-                            if 0 <= row < order_arr.shape[0] and 0 <= col < order_arr.shape[1]:
-                                v = int(order_arr[row, col])
-                                return v if v > 0 else 1
+                            poly = shape(shp)
+                            if poly.is_valid and not poly.is_empty:
+                                features_s.append({"geometry": poly})
                         except Exception:
-                            pass
-                        return 1
+                            continue
 
-                    gdf_s["ORDEN"] = gdf_s.geometry.apply(get_order)
-
-                if gdf_s is not None:
-                    gdf_s.to_file(streams_vec, driver="ESRI Shapefile")
+                if features_s:
+                    gdf_s = gpd.GeoDataFrame(features_s, crs=dem_crs)
+                    gdf_s["ORDEN"] = 1  # pysheds no calcula Strahler directo
                     gdf_s.to_file(os.path.join(out_folder, "red_hidrica.geojson"),
                                   driver="GeoJSON")
+                    try:
+                        gdf_s.to_file(os.path.join(out_folder, "red_hidrica.shp"))
+                    except Exception:
+                        pass
                     log(f"Red hídrica: {len(gdf_s)} segmentos")
             except Exception as e:
                 log(f"(Aviso) Red hídrica: {e}")
 
-            # Microcuencas
+            # Microcuencas vectoriales
             try:
-                wbt.raster_to_vector_polygons(dem_watershed, watersheds_vec)
-                gdf_w = force_crs_on_vector(watersheds_vec, dem_crs)
-                if gdf_w is not None:
+                ws_shapes = list(rs(combined.astype(np.int32), transform=grid.affine))
+                features_w = []
+                for shp, val in ws_shapes:
+                    if val > 0:
+                        try:
+                            poly = shape(shp)
+                            if poly.is_valid and not poly.is_empty:
+                                features_w.append({
+                                    "Microbasin": int(val),
+                                    "geometry": poly
+                                })
+                        except Exception:
+                            continue
+
+                if features_w:
+                    gdf_w = gpd.GeoDataFrame(features_w, crs=dem_crs)
                     gdf_w["Area_ha"] = gdf_w.geometry.area / 10000.0
-                    gdf_w.to_file(watersheds_vec, driver="ESRI Shapefile")
                     gdf_w.to_file(os.path.join(out_folder, "microcuencas.geojson"),
                                   driver="GeoJSON")
+                    try:
+                        gdf_w.to_file(os.path.join(out_folder, "microcuencas.shp"))
+                    except Exception:
+                        pass
                     log(f"Microcuencas: {len(gdf_w)} cuencas")
             except Exception as e:
                 log(f"(Aviso) Microcuencas: {e}")
 
             progress.progress(100, text="¡Listo!")
             log("=" * 50)
-            log(f"PROCESO COMPLETADO — {n_outlets} microcuencas")
+            log(f"PROCESO COMPLETADO — {len(all_catchments)} microcuencas")
             update_log()
 
-            st.success(f"✅ {n_outlets} microcuencas generadas. Descargá los resultados abajo.")
+            st.success(f"✅ {len(all_catchments)} microcuencas generadas.")
 
             # Vista previa
             try:
-                gdf_preview = gpd.read_file(os.path.join(out_folder, "microcuencas.geojson"))
+                gdf_preview = gpd.read_file(
+                    os.path.join(out_folder, "microcuencas.geojson")
+                )
                 st.subheader("📊 Vista previa")
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -422,7 +400,7 @@ if run_btn:
             except Exception:
                 pass
 
-            # Descarga ZIP
+            # ZIP
             zip_buffer = zip_outputs(out_folder)
             st.download_button(
                 label="⬇️ Descargar resultados (ZIP)",
