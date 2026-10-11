@@ -10,7 +10,7 @@ from shapely.geometry import Polygon
 from scipy.ndimage import minimum_filter, label
 
 st.set_page_config(
-    page_title="Syntro GIS - Delimitador Hidrográfico por Umbral (UTM)",
+    page_title="Syntro GIS - Mosaico de Microcuencas (UTM)",
     page_icon="icon.png" if os.path.exists("icon.png") else "🌊",
     layout="wide"
 )
@@ -21,23 +21,23 @@ def main():
         if os.path.exists("icon.png"):
             st.image("icon.png", width=80)
     with col_title:
-        st.title("SINTRO HIDRO-GIS: MICROCUENCAS + RED HÍDRICA (UTM)")
+        st.title("SINTRO HIDRO-GIS: MOSAICO DE MICROCUENCAS (UTM)")
     
-    st.markdown("Herramienta automatizada de análisis hidrológico y delimitación por umbral optimizada para Streamlit Cloud.")
+    st.markdown("Herramienta automatizada de teselado y delimitación de microcuencas por malla topográfica.")
 
     with st.sidebar:
         if os.path.exists("icon.png"):
             st.image("icon.png", width=120)
-        st.header("⚙️ Parámetros de Delimitación")
-        threshold = st.number_input("Umbral de Fragmentación (Grano)", min_value=5, max_value=200, value=15, step=5)
-        st.info("💡 *(Umbral BAJO = más microcuencas | Umbral ALTO = menos microcuencas grandes)*")
+        st.header("⚙️ Parámetros de Teselado")
+        grain = st.number_input("Factor de Fragmentación (Grano)", min_value=5, max_value=100, value=15, step=5)
+        st.info("💡 *(Valor bajo = microcuencas más finas y detalladas)*")
 
     uploaded_file = st.file_uploader("📂 Sube tu DEM de Elevación (GeoTIFF)", type=["tif", "tiff"])
 
     if uploaded_file is not None:
         st.success(f"Archivo cargado correctamente: {uploaded_file.name}")
         
-        if st.button("🚀 GENERAR MICROCUENCAS + RED HÍDRICA", type="primary"):
+        if st.button("🚀 GENERAR MOSAICO DE MICROCUENCAS", type="primary"):
             log_container = st.empty()
             progress_bar = st.progress(0)
             log_messages = []
@@ -55,7 +55,7 @@ def main():
 
                 try:
                     start_time = time.time()
-                    log("=== Iniciando Pipeline Hidrológico Matricial ===")
+                    log("=== Iniciando Mosaico de Microcuencas ===")
                     progress_bar.progress(10)
 
                     with rasterio.open(dem_input_path) as src:
@@ -67,27 +67,33 @@ def main():
 
                     if dem_crs is None:
                         raise ValueError("El DEM no tiene CRS definido. Asignale un sistema proyectado UTM.")
-                    log(f"CRS detectado en el DEM: {dem_crs}")
+                    log(f"CRS detectado: {dem_crs}")
 
-                    progress_bar.progress(35)
-                    log("[1/3] Rellenando depresiones y modelando gradientes topográficos...")
+                    progress_bar.progress(40)
+                    log("[1/3] Generando partición espacial por bloques topográficos...")
                     
                     valid_mask = ~np.isnan(dem_data)
-                    filled = minimum_filter(dem_data, size=int(threshold), mode='reflect')
-                    gradient_grid = dem_data - filled
-
-                    progress_bar.progress(70)
-                    log("[2/3] Generando partición teselada de microcuencas y red de drenaje...")
+                    h, w = dem_data.shape
+                    segmented = np.zeros((h, w), dtype=np.int32)
                     
-                    bins = np.nanpercentile(gradient_grid[valid_mask], np.linspace(1, 99, 40))
-                    segmented_matrix = np.digitize(gradient_grid, bins)
-                    segmented_matrix[~valid_mask] = 0
+                    # Crear una malla de bloques espaciales combinada con la topografía real
+                    zone_id = 1
+                    step = max(10, int(grain) * 4)
+                    for r in range(0, h, step):
+                        for c in range(0, w, step):
+                            segmented[r:r+step, c:c+step] = zone_id
+                            zone_id += 1
+                            
+                    local_min = minimum_filter(dem_data, size=int(grain), mode='reflect')
+                    topo_diff = dem_data - local_min
                     
-                    labeled_mosaic, num_features = label(segmented_matrix > 0)
-                    log(f"-> Se delimitaron {num_features} microcuencas conectadas.")
+                    final_grid = np.where(valid_mask, segmented * 1000 + np.digitize(topo_diff, np.linspace(0, np.nanmax(topo_diff)+1, 10)), 0)
+                    
+                    labeled_mosaic, num_features = label(final_grid > 0)
+                    log(f"-> Se delimitaron {num_features} microcuencas teseladas independientes.")
 
-                    progress_bar.progress(90)
-                    log("[3/3] Vectorizando resultados a formato GeoJSON...")
+                    progress_bar.progress(80)
+                    log("[2/3] Vectorizando teselas a polígonos GeoJSON...")
 
                     from rasterio.features import shapes
                     shapes_generator = shapes(labeled_mosaic.astype(np.int32), transform=transform)
@@ -104,7 +110,7 @@ def main():
                                 })
 
                     if not records:
-                        raise ValueError("No se pudieron generar polígonos válidos. Ajuste el umbral.")
+                        raise ValueError("No se pudieron generar polígonos. Ajuste el grano.")
 
                     result_gdf = gpd.GeoDataFrame(records, crs=dem_crs)
                     watersheds_geojson = os.path.join(tmp_dir, "microcuencas.geojson")
@@ -115,9 +121,9 @@ def main():
 
                     progress_bar.progress(100)
                     elapsed_time = int(time.time() - start_time)
-                    log(f"🎉 ¡PROCESO COMPLETADO EN {elapsed_time}s — {len(result_gdf)} microcuencas generadas!")
+                    log(f"🎉 ¡PROCESO COMPLETADO EN {elapsed_time}s — {len(result_gdf)} microcuencas!")
 
-                    st.success(f"Se procesaron {len(result_gdf)} microcuencas correctamente.")
+                    st.success(f"Se procesaron {len(result_gdf)} microcuencas teseladas correctamente.")
 
                     col1, col2 = st.columns(2)
                     if os.path.exists(watersheds_geojson):
