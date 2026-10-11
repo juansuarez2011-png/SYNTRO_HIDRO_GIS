@@ -5,6 +5,14 @@ import tempfile
 import traceback
 import time
 
+# ============================================================
+# FIX PARA STREAMLIT CLOUD:
+# whitebox intenta descargar su binario en site-packages (sin permisos).
+# Le decimos que lo haga en /tmp/wbt (con permisos).
+# ============================================================
+os.environ["WBT_PATH"] = "/tmp/wbt"
+os.makedirs("/tmp/wbt", exist_ok=True)
+
 import streamlit as st
 import numpy as np
 import rasterio
@@ -20,6 +28,9 @@ except ImportError:
 LOGO_PATH = "icon.png"
 
 
+# ============================================================
+# CONFIGURACIÓN DE PÁGINA
+# ============================================================
 st.set_page_config(
     page_title="SYNTRO Hidro-GIS",
     page_icon=LOGO_PATH if os.path.exists(LOGO_PATH) else "🌳",
@@ -28,6 +39,9 @@ st.set_page_config(
 )
 
 
+# ============================================================
+# CSS PERSONALIZADO
+# ============================================================
 st.markdown("""
 <style>
     .stApp { background-color: #0f172a; }
@@ -66,7 +80,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ============================================================
+# HELPERS
+# ============================================================
 def force_crs_on_raster(raster_path, crs):
+    """Reescribe un ráster forzando su CRS si no lo tiene."""
     if not os.path.exists(raster_path):
         return
     with rasterio.open(raster_path) as src:
@@ -80,6 +98,7 @@ def force_crs_on_raster(raster_path, crs):
 
 
 def force_crs_on_vector(vector_path, crs):
+    """Reescribe un shapefile forzando su CRS."""
     if not os.path.exists(vector_path):
         return None
     gdf = gpd.read_file(vector_path)
@@ -89,6 +108,7 @@ def force_crs_on_vector(vector_path, crs):
 
 
 def extract_stream_outlets(streams_path, acc_path, out_path, spacing):
+    """Genera raster con IDs únicos en cabeceras de segmento de río."""
     with rasterio.open(streams_path) as src:
         streams = src.read(1)
         meta = src.meta.copy()
@@ -123,6 +143,7 @@ def extract_stream_outlets(streams_path, acc_path, out_path, spacing):
 
 
 def zip_outputs(folder):
+    """Empaqueta los archivos de salida en un ZIP para descarga."""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(folder):
@@ -134,6 +155,9 @@ def zip_outputs(folder):
     return zip_buffer
 
 
+# ============================================================
+# HEADER
+# ============================================================
 col_logo, col_title = st.columns([1, 5])
 with col_logo:
     if os.path.exists(LOGO_PATH):
@@ -145,6 +169,9 @@ with col_title:
 st.divider()
 
 
+# ============================================================
+# SIDEBAR
+# ============================================================
 with st.sidebar:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
@@ -166,13 +193,16 @@ with st.sidebar:
     spacing = st.number_input(
         "Puntos de Salida por Río",
         min_value=10, max_value=2000, value=200, step=10,
-        help="Cada N celdas de río se toma un punto de salida."
+        help="Cada N celdas de río se toma un punto de salida (emula Stream Link)."
     )
 
     st.divider()
     run_btn = st.button("🚀 GENERAR MICROCUENCAS", use_container_width=True)
 
 
+# ============================================================
+# PROCESAMIENTO
+# ============================================================
 if not WHITEBOX_OK:
     st.error("⚠️ WhiteboxTools no está instalado. Revisá `requirements.txt`.")
     st.stop()
@@ -221,9 +251,19 @@ if run_btn:
             if not dem_crs.is_projected:
                 log("⚠️ CRS no proyectado. Las áreas podrían ser incorrectas.")
 
-            wbt = whitebox.WhiteboxTools()
-            wbt.set_verbose_mode(False)
-            wbt.set_working_dir(out_folder)
+            # --- Inicializar WhiteboxTools (descarga binario en /tmp/wbt)
+            log("Inicializando WhiteboxTools...")
+            update_log()
+            try:
+                wbt = whitebox.WhiteboxTools()
+                wbt.set_verbose_mode(False)
+                wbt.set_working_dir(out_folder)
+                log("WhiteboxTools listo.")
+            except Exception as e:
+                log(f"ERROR al inicializar WhiteboxTools: {e}")
+                update_log()
+                st.error(f"❌ No se pudo inicializar WhiteboxTools: {e}")
+                st.stop()
 
             dem_fill         = os.path.join(out_folder, "01_dem_fill.tif")
             dem_fdir         = os.path.join(out_folder, "02_flow_dir.tif")
@@ -235,21 +275,25 @@ if run_btn:
             streams_vec      = os.path.join(out_folder, "red_hidrica.shp")
             watersheds_vec   = os.path.join(out_folder, "microcuencas.shp")
 
+            # --- 1. Fill
             log("[1/8] Rellenando depresiones...")
             update_log(); progress.progress(10, text="Rellenando depresiones...")
             wbt.fill_depressions(dem_path, dem_fill)
             force_crs_on_raster(dem_fill, dem_crs)
 
+            # --- 2. Flow Direction
             log("[2/8] Dirección de flujo...")
             update_log(); progress.progress(20, text="Dirección de flujo...")
             wbt.d8_pointer(dem_fill, dem_fdir)
             force_crs_on_raster(dem_fdir, dem_crs)
 
+            # --- 3. Flow Accumulation
             log("[3/8] Acumulación de flujo...")
             update_log(); progress.progress(30, text="Acumulación de flujo...")
             wbt.d8_flow_accumulation(dem_fill, dem_acc, out_type='cells')
             force_crs_on_raster(dem_acc, dem_crs)
 
+            # --- 4. Streams por umbral
             log(f"[4/8] Red hídrica (umbral={threshold})...")
             update_log(); progress.progress(45, text="Extrayendo red hídrica...")
             wbt.extract_streams(dem_acc, dem_stream, threshold=threshold)
@@ -262,6 +306,7 @@ if run_btn:
             if n_cells == 0:
                 raise ValueError(f"El umbral {threshold} no generó red. Reducilo.")
 
+            # --- 5. Orden de Strahler
             log("[5/8] Orden de Strahler...")
             update_log(); progress.progress(55, text="Orden de Strahler...")
             try:
@@ -272,20 +317,24 @@ if run_btn:
                 log(f"(Aviso) Orden: {e}")
                 dem_stream_order = None
 
+            # --- 6. Puntos de salida
             log("[6/8] Puntos de salida...")
             update_log(); progress.progress(65, text="Puntos de salida...")
             n_outlets = extract_stream_outlets(dem_stream, dem_acc, dem_outlets, spacing)
             force_crs_on_raster(dem_outlets, dem_crs)
             log(f"Puntos de salida: {n_outlets}")
 
+            # --- 7. Watershed
             log("[7/8] Delimitando cuencas...")
             update_log(); progress.progress(78, text="Delimitando cuencas...")
             wbt.watershed(dem_fdir, dem_outlets, dem_watershed, esri_pntr=False)
             force_crs_on_raster(dem_watershed, dem_crs)
 
+            # --- 8. Vectorizar
             log("[8/8] Vectorizando...")
             update_log(); progress.progress(90, text="Vectorizando...")
 
+            # Red hídrica con orden
             try:
                 wbt.raster_streams_to_vector(dem_stream, dem_fdir, streams_vec)
                 gdf_s = force_crs_on_vector(streams_vec, dem_crs)
@@ -317,6 +366,7 @@ if run_btn:
             except Exception as e:
                 log(f"(Aviso) Red hídrica: {e}")
 
+            # Microcuencas
             try:
                 wbt.raster_to_vector_polygons(dem_watershed, watersheds_vec)
                 gdf_w = force_crs_on_vector(watersheds_vec, dem_crs)
@@ -336,6 +386,7 @@ if run_btn:
 
             st.success(f"✅ {n_outlets} microcuencas generadas. Descargá los resultados abajo.")
 
+            # Vista previa
             try:
                 gdf_preview = gpd.read_file(os.path.join(out_folder, "microcuencas.geojson"))
                 st.subheader("📊 Vista previa")
@@ -349,6 +400,7 @@ if run_btn:
             except Exception:
                 pass
 
+            # Descarga ZIP
             zip_buffer = zip_outputs(out_folder)
             st.download_button(
                 label="⬇️ Descargar resultados (ZIP)",
