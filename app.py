@@ -9,6 +9,11 @@ import geopandas as gpd
 
 try:
     import whitebox
+    # Parche crítico para redirigir los binarios de WhiteboxTools a /tmp y evitar el error de permisos
+    import whitebox.whitebox_tools as wbt_module
+    tmp_dir_wbt = tempfile.gettempdir()
+    wbt_module.zip_name = os.path.join(tmp_dir_wbt, "WhiteboxTools_linux_amd64.zip")
+    wbt_module.exe_path = os.path.join(tmp_dir_wbt, "whitebox_tools", "WBT", "whitebox_tools")
     WHITEBOX_OK = True
 except ImportError:
     WHITEBOX_OK = False
@@ -91,7 +96,7 @@ def main():
     with col_title:
         st.title("SINTRO HIDRO-GIS: Microcuencas + Orden de Ríos (UTM)")
     
-    st.markdown("Herramienta automatizada de análisis hidrológico.")
+    st.markdown("Herramienta automatizada de análisis hidrológico[cite: 12].")
 
     if not WHITEBOX_OK:
         st.error("WhiteboxTools no está instalado.")
@@ -136,14 +141,10 @@ def main():
                         raise ValueError("El DEM no tiene CRS definido. Asignale un sistema proyectado UTM.")
                     log(f"CRS detectado en el DEM: {dem_crs}")
 
-                    # Solución robusta de permisos para WhiteboxTools en Linux
                     wbt = whitebox.WhiteboxTools()
                     wbt.set_verbose_mode(False)
                     wbt.work_dir = tmp_dir
                     wbt.set_working_dir(tmp_dir)
-                    
-                    # Forzar la ruta del ejecutable al directorio temporal si es necesario
-                    wbt.exe_path = os.path.join(tmp_dir, "whitebox_tools")
 
                     dem_fill         = os.path.join(tmp_dir, "01_dem_fill.tif")
                     dem_fdir         = os.path.join(tmp_dir, "02_flow_dir.tif")
