@@ -256,7 +256,7 @@ if run_btn:
             update_log()
             try:
                 wbt = whitebox.WhiteboxTools()
-                wbt.set_verbose_mode(False)
+                wbt.set_verbose_mode(True)   # <-- CAMBIO: verbose activado
                 wbt.set_working_dir(out_folder)
                 log("WhiteboxTools listo.")
             except Exception as e:
@@ -279,24 +279,44 @@ if run_btn:
             log("[1/8] Rellenando depresiones...")
             update_log(); progress.progress(10, text="Rellenando depresiones...")
             wbt.fill_depressions(dem_path, dem_fill)
+            if not os.path.exists(dem_fill):
+                raise RuntimeError("WBT no generó 01_dem_fill.tif")
             force_crs_on_raster(dem_fill, dem_crs)
 
             # --- 2. Flow Direction
             log("[2/8] Dirección de flujo...")
             update_log(); progress.progress(20, text="Dirección de flujo...")
             wbt.d8_pointer(dem_fill, dem_fdir)
+            if not os.path.exists(dem_fdir):
+                raise RuntimeError("WBT no generó 02_flow_dir.tif")
             force_crs_on_raster(dem_fdir, dem_crs)
 
             # --- 3. Flow Accumulation
             log("[3/8] Acumulación de flujo...")
             update_log(); progress.progress(30, text="Acumulación de flujo...")
             wbt.d8_flow_accumulation(dem_fill, dem_acc, out_type='cells')
+            if not os.path.exists(dem_acc):
+                raise RuntimeError("WBT no generó 03_flow_accum.tif")
             force_crs_on_raster(dem_acc, dem_crs)
 
             # --- 4. Streams por umbral
             log(f"[4/8] Red hídrica (umbral={threshold})...")
             update_log(); progress.progress(45, text="Extrayendo red hídrica...")
-            wbt.extract_streams(dem_acc, dem_stream, threshold=threshold)
+
+            # FIX: zero_background=True requerido en WBT 2.3.0+
+            try:
+                wbt.extract_streams(dem_acc, dem_stream,
+                                    threshold=threshold,
+                                    zero_background=True)
+            except Exception as e:
+                log(f"Error en extract_streams: {e}")
+
+            if not os.path.exists(dem_stream):
+                raise RuntimeError(
+                    f"WBT no generó {dem_stream}. "
+                    f"Umbral={threshold}. Probá bajarlo (ej: 500)."
+                )
+
             force_crs_on_raster(dem_stream, dem_crs)
 
             with rasterio.open(dem_stream) as src:
@@ -304,7 +324,7 @@ if run_btn:
                 n_cells = int((streams_arr > 0).sum())
             log(f"Celdas de río: {n_cells}")
             if n_cells == 0:
-                raise ValueError(f"El umbral {threshold} no generó red. Reducilo.")
+                raise ValueError(f"El umbral {threshold} no generó red. Reducilo (ej: 500).")
 
             # --- 5. Orden de Strahler
             log("[5/8] Orden de Strahler...")
@@ -328,6 +348,8 @@ if run_btn:
             log("[7/8] Delimitando cuencas...")
             update_log(); progress.progress(78, text="Delimitando cuencas...")
             wbt.watershed(dem_fdir, dem_outlets, dem_watershed, esri_pntr=False)
+            if not os.path.exists(dem_watershed):
+                raise RuntimeError("WBT no generó 07_watersheds.tif")
             force_crs_on_raster(dem_watershed, dem_crs)
 
             # --- 8. Vectorizar
