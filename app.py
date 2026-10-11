@@ -2,6 +2,11 @@ import os
 import time
 import tempfile
 import traceback
+
+# Configurar variables de entorno ANTES de importar whitebox para evitar el error de permisos en Linux
+tmp_dir_wbt = tempfile.gettempdir()
+os.environ["WHITEBOX_WORK_DIR"] = tmp_dir_wbt
+
 import streamlit as st
 import numpy as np
 import rasterio
@@ -9,11 +14,6 @@ import geopandas as gpd
 
 try:
     import whitebox
-    # Parche crítico para redirigir los binarios de WhiteboxTools a /tmp y evitar el error de permisos
-    import whitebox.whitebox_tools as wbt_module
-    tmp_dir_wbt = tempfile.gettempdir()
-    wbt_module.zip_name = os.path.join(tmp_dir_wbt, "WhiteboxTools_linux_amd64.zip")
-    wbt_module.exe_path = os.path.join(tmp_dir_wbt, "whitebox_tools", "WBT", "whitebox_tools")
     WHITEBOX_OK = True
 except ImportError:
     WHITEBOX_OK = False
