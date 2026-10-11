@@ -13,10 +13,10 @@ try:
 except ImportError:
     WHITEBOX_OK = False
 
-# Configuración de la página en Streamlit
+# Configuración de la página en Streamlit con el logo icon.png
 st.set_page_config(
     page_title="Syntro GIS - Delimitador Hidrográfico",
-    page_icon="🌊",
+    page_icon="icon.png" if os.path.exists("icon.png") else "🌊",
     layout="wide"
 )
 
@@ -50,7 +50,7 @@ def force_crs_on_vector(vector_path, crs):
                     os.remove(p)
                 except Exception:
                     pass
-        gdf.to_file(vector_path, driver="ESRI Shapefile")
+            gdf.to_file(vector_path, driver="ESRI Shapefile")
     return gdf
 
 def extract_stream_outlets(streams_path, fdir_path, acc_path, out_path, spacing):
@@ -88,14 +88,23 @@ def extract_stream_outlets(streams_path, fdir_path, acc_path, out_path, spacing)
     return len(sampled_rows)
 
 def main():
-    st.title("🌊 SINTRO HIDRO-GIS: Microcuencas + Orden de Ríos (UTM)")
-    st.markdown("Herramienta automatizada de análisis hidrológico basada en WhiteboxTools.")
+    # Mostrar el logo icon.png en la interfaz si existe
+    col_logo, col_title = st.columns([1, 8])
+    with col_logo:
+        if os.path.exists("icon.png"):
+            st.image("icon.png", width=80)
+    with col_title:
+        st.title("SINTRO HIDRO-GIS: Microcuencas + Orden de Ríos (UTM)")
+    
+    st.markdown("Herramienta automatizada de análisis hidrológico basada en WhiteboxTools[cite: 12].")
 
     if not WHITEBOX_OK:
-        st.error("WhiteboxTools no está instalado. Asegúrate de incluirlo en tu archivo `requirements.txt` o `packages.txt`.")
+        st.error("WhiteboxTools no está instalado. Asegúrate de incluirlo en tu archivo `requirements.txt`.")
         return
 
     with st.sidebar:
+        if os.path.exists("icon.png"):
+            st.image("icon.png", width=120)
         st.header("⚙️ Parámetros de Análisis")
         threshold = st.number_input("Umbral de Acumulación (Celdas)", min_value=10, max_value=50000, value=500, step=50)
         spacing = st.number_input("Puntos de Salida por Río (Espaciado)", min_value=10, max_value=2000, value=200, step=50)
@@ -117,7 +126,7 @@ def main():
                 log_messages.append(line)
                 log_container.text_area("Registro de Ejecución (Log)", value="\n".join(log_messages), height=250)
 
-            # Crear directorio temporal para el procesamiento
+            # Crear directorio temporal seguro para evitar errores de permisos
             with tempfile.TemporaryDirectory() as tmp_dir:
                 dem_input_path = os.path.join(tmp_dir, uploaded_file.name)
                 with open(dem_input_path, "wb") as f:
@@ -136,6 +145,8 @@ def main():
 
                     wbt = whitebox.WhiteboxTools()
                     wbt.set_verbose_mode(False)
+                    # Solución al error de permisos: apuntar los binarios y el directorio de trabajo al temporal
+                    wbt.work_dir = tmp_dir
                     wbt.set_working_dir(tmp_dir)
 
                     dem_fill         = os.path.join(tmp_dir, "01_dem_fill.tif")
@@ -232,7 +243,7 @@ def main():
 
                     st.success(f"Se procesaron {n_outlets} microcuencas correctamente.")
 
-                    # Botones de descarga para Streamlit
+                    # Botones de descarga
                     col1, col2 = st.columns(2)
                     if os.path.exists(watersheds_geojson):
                         with open(watersheds_geojson, "rb") as f:
