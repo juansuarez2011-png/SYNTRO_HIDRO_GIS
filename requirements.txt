@@ -5,4 +5,4 @@ rasterio
 geopandas
 shapely
 Pillow
-whitebox
+pysheds
