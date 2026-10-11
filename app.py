@@ -285,22 +285,22 @@ def main():
 
                     st.success(f"Se generaron {n_outlets} microcuencas y la red hídrica con éxito.")
 
-                    # Botones de descarga directa en Streamlit
+                    # Botones de descarga directa en Streamlit corregidos
                     col1, col2 = st.columns(2)
                     if os.path.exists(watersheds_geojson):
-                        with open(watersheds_geojson, "rb") as f:
+                        with open(watersheds_geojson, "rb") as f_w:
                             col1.download_button(
                                 label="📥 Descargar Microcuencas (GeoJSON)",
-                                data=f,
+                                data=f_w,
                                 file_name="microcuencas.geojson",
                                 mime="application/geo+json"
                             )
                     
                     if os.path.exists(streams_geojson):
-                        with open(streams_geojson, "rb"] as f:
+                        with open(streams_geojson, "rb") as f_s:
                             col2.download_button(
                                 label="📥 Descargar Red Hídrica (GeoJSON)",
-                                data=f,
+                                data=f_s,
                                 file_name="red_hidrica.geojson",
                                 mime="application/geo+json"
                             )
