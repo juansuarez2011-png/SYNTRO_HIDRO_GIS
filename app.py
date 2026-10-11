@@ -32,7 +32,7 @@ def main():
         threshold = st.number_input("Umbral de Fragmentación (Grano)", min_value=5, max_value=200, value=15, step=5)
         st.info("💡 *(Umbral BAJO = más microcuencas | Umbral ALTO = menos microcuencas grandes)*")
 
-    uploaded_file = st.file_uploader("📂 DEM de Elevación (GeoTIFF)", type=["tif", "tiff"])
+    uploaded_file = st.file_uploader("📂 Sube tu DEM de Elevación (GeoTIFF)", type=["tif", "tiff"])
 
     if uploaded_file is not None:
         st.success(f"Archivo cargado correctamente: {uploaded_file.name}")
